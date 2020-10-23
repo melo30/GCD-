@@ -9,6 +9,12 @@
 
 @interface ViewController ()
 
+/// 火车票数量
+@property (nonatomic, assign) NSInteger ticketSurplusCount;
+
+/// 信号量
+@property (nonatomic, strong) dispatch_semaphore_t semaphoreLock;
+
 @end
 
 @implementation ViewController
@@ -135,7 +141,7 @@
 //    [self groupWait];
     
 #pragma mark - dispatch_group_enter、diaptch_group_leave
-    [self groupEnterAndLeave];
+//    [self groupEnterAndLeave];
     
 #pragma mark - GCD信号量：dispatch_semaphore  *****信号量是重点和难点哟*****
     // 说明：
@@ -152,6 +158,18 @@
     // 我们在开发中，会遇到这样的需求：异步执行耗时任务，并使用异步执行的结果进行一些额外的操作。换句话说，相当于，将异步执行任务转换为同步执行任务。比如说：AFNetworking 中 AFURLSessionManager.m 里面 的 tasksForKeyPath：方法。通过引入信号量的方式，等待异步执行任务结果，获取到tasks，然后再返回该tasks。
     
     
+    
+    
+    // 下面，我们来利用 Dispatch Semaphore 实现线程同步，将异步执行任务转换为同步执行任务。
+//    [self semaphoreSync];
+    
+    
+    // 接着，我们再来看下线程安全问题：经典火车票案例
+    // 1.非线程安全(不使用semaphore加锁)
+//    [self initTicketStatusNotSave];
+    
+    // 2.线程安全(使用semaphore加锁)
+    [self initTicketStatusSave];
 }
 
 
@@ -196,7 +214,7 @@
     NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
         NSLog(@"asyncConcurrent---begin");
         
-        dispatch_queue_t queue = dispatch_queue_create("net.bujige.testQueue", DISPATCH_QUEUE_CONCURRENT);
+        dispatch_queue_t queue = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_CONCURRENT);
         
         dispatch_async(queue, ^{
             // 追加任务 1
@@ -229,7 +247,7 @@
     NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
         NSLog(@"syncSerial---begin");
         
-        dispatch_queue_t queue = dispatch_queue_create("net.bujige.testQueue", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_t queue = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
         
         dispatch_sync(queue, ^{
             // 追加任务 1
@@ -259,7 +277,7 @@
     NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
         NSLog(@"syncSerial---begin");
         
-        dispatch_queue_t queue = dispatch_queue_create("net.bujige.testQueue", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_t queue = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
         
         dispatch_async(queue, ^{
             // 追加任务 1
@@ -309,7 +327,7 @@
 }
 
 - (void)barrier {
-    dispatch_queue_t queue = dispatch_queue_create("net.bujige.testQueue", DISPATCH_QUEUE_CONCURRENT);
+    dispatch_queue_t queue = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_CONCURRENT);
     
     dispatch_async(queue, ^{
         //追加任务1
@@ -478,5 +496,130 @@
     // 4.从 dispatch_group_enter、dispatch_group_leave 相关代码运行结果中可以看出：当所有任务执行完成之后，才执行 dispatch_group_notify 中的任务。这里的dispatch_group_enter、dispatch_group_leave 组合，其实等同于dispatch_group_async。
 }
 
+- (void)semaphoreSync {
+    NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
+    NSLog(@"semaphore---begin");
+    
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);//初始创建时计数为 0
+    
+    __block int number = 0;
+    
+    dispatch_async(queue, ^{
+        // 追加任务 1
+        [NSThread sleepForTimeInterval:2];              // 模拟耗时操作
+        NSLog(@"1---%@",[NSThread currentThread]);      // 打印当前线程
+        
+        number = 100;
+        
+        dispatch_semaphore_signal(semaphore);
+    });
+    
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+    NSLog(@"semaphore---end, number = %d",number);
+    
+    // 说明：
+    // semaphore---end 是在执行完 number = 100; 之后才打印的。而且输出结果 number 为 100。这是因为 异步执行 不会做任何等待，可以继续执行任务。
+    // 执行顺序如下：
+    // 1.semaphore 初始创建时计数为 0。
+    // 2.异步执行 将 任务 1 追加到队列之后，不做等待，接着执行 dispatch_semaphore_wait 方法，使得semaphore 减 1，此时 semaphore == -1，当前线程进入等待状态。
+    // 3.然后，追加任务 1 开始执行。任务 1 执行到 dispatch_semaphore_signal 之后，总信号量加 1，然后 semaphore == 0，正在被阻塞的线程（主线程）恢复继续执行。
+    // 4.最后打印 semaphore---end,number = 100。
+    
+    // 5.这样就实现了线程同步，将异步执行任务转换为同步执行任务! 你学到了吗？
+}
+
+
+/// 非线程安全：不使用 semaphore，初始化火车票数量、卖票窗口（非线程安全）、并开始卖票
+- (void)initTicketStatusNotSave {
+    NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
+    NSLog(@"semaphore---begin");
+    
+    //初始化火车票张数
+    self.ticketSurplusCount = 50;
+    
+    // 创建一个串行队列queue1,代表重庆火车票售卖窗口
+    dispatch_queue_t queue1 = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
+    // 创建一个串行队列queue2,代表成都火车票售卖窗口
+    dispatch_queue_t queue2 = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
+    
+    __weak typeof(self)wself = self;
+    dispatch_async(queue1, ^{
+        [wself saleTicketNotSafe];
+    });
+    dispatch_async(queue2, ^{
+        [wself saleTicketNotSafe];
+    });
+}
+
+/// 售卖火车票（非线程安全）
+- (void)saleTicketNotSafe {
+    while (1) {
+        if (self.ticketSurplusCount > 0) {// 如果还有余票，继续售卖
+            self.ticketSurplusCount --;
+            NSLog(@"%@",[NSString stringWithFormat:@"剩余票数：%ld 窗口：%@",(long)self.ticketSurplusCount,[NSThread currentThread]]);
+            [NSThread sleepForTimeInterval:0.2];
+        }else {// 如果已经卖完，关闭售票窗口
+            NSLog(@"所有火车票均已售完！！！！！");
+            break;// 跳出while循环
+        }
+    }
+    
+    // 说明：
+    // 打印结果可以看到在不考虑线程安全，不使用 semaphore 的情况下，得到票数是错乱的，这样显然不符合我们的需求，所以我们需要考虑线程安全问题。
+}
+
+
+/// 线程安全：使用 semaphore 加锁，初始化火车票数量、卖票窗口（线程安全）、并开始卖票
+- (void)initTicketStatusSave {
+    NSLog(@"currentThread---%@",[NSThread currentThread]);  // 打印当前线程
+    NSLog(@"semaphore---begin");
+    
+    self.semaphoreLock = dispatch_semaphore_create(1);//创建初始计数为1
+    
+    //初始化火车票张数
+    self.ticketSurplusCount = 50;
+    
+    // 创建一个串行队列queue1,代表重庆火车票售卖窗口
+    dispatch_queue_t queue1 = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
+    // 创建一个串行队列queue2,代表成都火车票售卖窗口
+    dispatch_queue_t queue2 = dispatch_queue_create("com.manjiwang.GCD", DISPATCH_QUEUE_SERIAL);
+    
+    __weak typeof(self)wself = self;
+    dispatch_async(queue1, ^{
+        [wself saleTicketNotSafe];
+    });
+    dispatch_async(queue2, ^{
+        [wself saleTicketNotSafe];
+    });
+}
+
+/// 售卖火车票（线程安全）
+- (void)saleTicketSafe {
+    while (1) {
+        // 相当于加锁
+        dispatch_semaphore_wait(self.semaphoreLock, DISPATCH_TIME_FOREVER);
+        
+        if (self.ticketSurplusCount > 0) { //如果还有余票，继续售卖
+            self.ticketSurplusCount --;
+            NSLog(@"%@", [NSString stringWithFormat:@"剩余票数：%ld 窗口：%@", (long)self.ticketSurplusCount, [NSThread currentThread]]);
+            [NSThread sleepForTimeInterval:0.2];
+        }else {// 如果已卖完，关闭售票窗口
+            NSLog(@"所有火车票均已售完！！！！！");
+            // 相当于解锁（计数+1）
+            dispatch_semaphore_signal(self.semaphoreLock);
+            break;;
+        }
+        // 相当于解锁（计数+1）
+        dispatch_semaphore_signal(self.semaphoreLock);
+    }
+    
+    // 说明：
+    // 执行过程如下：
+    // 1.初始化信号量计数为1
+    // 2.首次一个窗口进来售卖火车票，到达dispatch_semaphore_wait时候，新号总量-1后等于0，可以正常执行卖票
+    // 3.第二次下一个窗口进来售卖火车票，如果第一次还没卖票完毕的话(即 没有解锁信号量+1)，这时新号总量就为0，到达dispatch_semaphore_wait时候，新号总量-1后等于-1，这时就会一直等待（阻塞所在线程），直到上一次卖票完毕更新信号量。以后每一次如此循环，所以安全!
+    // 可以看出，在考虑了线程安全的情况下，使用 dispatch_semaphore机制之后，得到的票数是正确的，没有出现混乱的情况。我们也就解决了多个线程同步的问题!
+}
 
 @end
